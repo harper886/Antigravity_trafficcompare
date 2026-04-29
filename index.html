@@ -36,8 +36,12 @@
     
     <!-- ECharts -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
-    
+
+    <!-- html2canvas for screenshot export -->
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+
     <!-- No external map dependency needed -->
+
 
     <style>
         body { background-color: #0b1120; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; overflow-x: hidden; }
@@ -53,6 +57,15 @@
             100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0); }
         }
         .animate-play-pulse { animation: playPulse 2s infinite; }
+        /* 时间进度条 */
+        .time-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 6px; border-radius: 3px; background: linear-gradient(to right, #06b6d4 var(--pct,0%), #1e293b var(--pct,0%)); outline: none; cursor: pointer; }
+        .time-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #06b6d4; box-shadow: 0 0 8px rgba(6,182,212,0.8); cursor: pointer; }
+        /* 键盘提示 */
+        .kbd-hint { display:inline-block; background:rgba(51,65,85,0.6); border:1px solid rgba(71,85,105,0.8); border-radius:4px; padding:1px 5px; font-size:10px; font-family:monospace; color:#94a3b8; }
+        /* 截图按钮动效 */
+        @keyframes snapFlash { 0%,100%{opacity:1} 50%{opacity:0.3} }
+        .snap-flash { animation: snapFlash 0.4s ease; }
+
     </style>
 </head>
 <body class="min-h-screen text-textMain custom-scrollbar p-4 flex flex-col gap-4">
@@ -558,12 +571,150 @@
             );
         });
 
+        // =====================================================
+        // 功能A: PR 曲线组件（全阈值扫描 — 对齐 AUC-PR 数值）
+        // =====================================================
+        const PRCurveChart = memo(({ nycGrid, chiGrid, threshold, timeCount }) => {
+            const computePRCurve = useCallback((grid) => {
+                if (!grid || !grid.length) return [];
+                const thresholds = Array.from({length:51}, (_,i) => i/50);
+                return thresholds.map(th => {
+                    let tp=0,fp=0,fn=0;
+                    for (let t=0; t<timeCount; t++) {
+                        grid.forEach(g => {
+                            const pred = sigmoid(g.flowSeries[t]) >= th ? 1 : 0;
+                            const label = g.labelSeries[t]===1 ? 1 : 0;
+                            if(pred===1&&label===1) tp++;
+                            else if(pred===1&&label===0) fp++;
+                            else if(pred===0&&label===1) fn++;
+                        });
+                    }
+                    const prec = tp+fp>0 ? tp/(tp+fp) : 1;
+                    const rec  = tp+fn>0 ? tp/(tp+fn) : 0;
+                    return [rec, prec];
+                });
+            }, [timeCount]);
 
-        const DetailPanel = memo(({ areaData, currentTime }) => {
+            const nycPR  = useMemo(() => computePRCurve(nycGrid),  [nycGrid,  computePRCurve]);
+            const chiPR  = useMemo(() => computePRCurve(chiGrid),  [chiGrid,  computePRCurve]);
+
+            // 当前阈值对应点
+            const getPoint = (grid, th) => {
+                if (!grid||!grid.length) return [0,0];
+                let tp=0,fp=0,fn=0;
+                for(let t=0;t<timeCount;t++){
+                    grid.forEach(g => {
+                        const pred=sigmoid(g.flowSeries[t])>=th?1:0;
+                        const label=g.labelSeries[t]===1?1:0;
+                        if(pred===1&&label===1)tp++; else if(pred===1&&label===0)fp++; else if(pred===0&&label===1)fn++;
+                    });
+                }
+                return [tp+fn>0?tp/(tp+fn):0, tp+fp>0?tp/(tp+fp):1];
+            };
+            const nycPt = useMemo(()=>getPoint(nycGrid,threshold),[nycGrid,threshold,timeCount]);
+            const chiPt = useMemo(()=>getPoint(chiGrid,threshold),[chiGrid,threshold,timeCount]);
+
+            const option = useMemo(() => ({
+                tooltip: { trigger:'axis', formatter: p => `Recall: ${(p[0].value[0]*100).toFixed(1)}%<br/>Precision: ${(p[0].value[1]*100).toFixed(1)}%` },
+                legend: { data:['NYC','Chicago'], textStyle:{color:'#94a3b8',fontSize:10}, top:0 },
+                grid: { top:30, bottom:30, left:42, right:15 },
+                xAxis: { type:'value', name:'Recall', nameTextStyle:{color:'#64748b',fontSize:10}, min:0, max:1,
+                    axisLabel:{formatter:v=>(v*100).toFixed(0)+'%',fontSize:9}, splitLine:{lineStyle:{color:'#1e293b',type:'dashed'}} },
+                yAxis: { type:'value', name:'Precision', nameTextStyle:{color:'#64748b',fontSize:10,padding:[0,0,0,-30]}, min:0, max:1,
+                    axisLabel:{formatter:v=>(v*100).toFixed(0)+'%',fontSize:9}, splitLine:{lineStyle:{color:'#1e293b',type:'dashed'}} },
+                series: [
+                    { name:'NYC', type:'line', data:nycPR, smooth:false, showSymbol:false,
+                      itemStyle:{color:'#06b6d4'}, lineStyle:{width:2},
+                      areaStyle:{color:'rgba(6,182,212,0.08)'},
+                      markPoint:{data:[{coord:nycPt,itemStyle:{color:'#06b6d4'},symbol:'circle',symbolSize:10,
+                        label:{show:true,formatter:`T=${threshold.toFixed(2)}`,fontSize:8,color:'#06b6d4',position:'top'}}]}
+                    },
+                    { name:'Chicago', type:'line', data:chiPR, smooth:false, showSymbol:false,
+                      itemStyle:{color:'#8b5cf6'}, lineStyle:{width:2,type:'dashed'},
+                      markPoint:{data:[{coord:chiPt,itemStyle:{color:'#8b5cf6'},symbol:'circle',symbolSize:10}]}
+                    }
+                ]
+            }), [nycPR, chiPR, nycPt, chiPt, threshold]);
+
+            return (
+                <div className="flex-1 flex flex-col pt-1">
+                    <div className="text-xs text-textMuted text-center mb-1">全阈值扫描 Precision-Recall 曲线 · 面积≈AUC-PR</div>
+                    <ReactECharts option={option} className="w-full flex-1 min-h-[240px]" />
+                </div>
+            );
+        });
+
+        // =====================================================
+        // 功能C: 风险分布直方图（当前时步所有格子的风险分布）
+        // =====================================================
+        const RiskHistogram = memo(({ gridRaw, currentTime, threshold }) => {
+            const { bins, maxCount } = useMemo(() => {
+                if (!gridRaw||!gridRaw.length) return { bins:[], maxCount:1 };
+                const BINS=10;
+                const counts = Array(BINS).fill(0);
+                const hitCounts = Array(BINS).fill(0);
+                gridRaw.forEach(g => {
+                    const risk = sigmoid(g.flowSeries[currentTime]);
+                    const isHit = g.labelSeries[currentTime]===1;
+                    const idx = Math.min(Math.floor(risk*BINS), BINS-1);
+                    counts[idx]++;
+                    if(isHit) hitCounts[idx]++;
+                });
+                const bins = counts.map((c,i)=>({
+                    label:`${i*10}%-${(i+1)*10}%`,
+                    lo:i/BINS, hi:(i+1)/BINS,
+                    count:c, hits:hitCounts[i]
+                }));
+                return { bins, maxCount: Math.max(...counts, 1) };
+            }, [gridRaw, currentTime]);
+
+            const threshBin = Math.min(Math.floor(threshold*10), 9);
+            const option = useMemo(() => ({
+                tooltip: { trigger:'axis', formatter: p => {
+                    const b = bins[p[0].dataIndex];
+                    return b ? `风险 ${b.label}<br/>格子数: <b>${b.count}</b><br/>命中 GT: <b style="color:#fbbf24">${b.hits}</b>` : '';
+                }},
+                grid: { top:20, bottom:35, left:35, right:10 },
+                xAxis: { type:'category', data:bins.map(b=>b.label), axisLabel:{rotate:30,fontSize:8,color:'#64748b'}, axisLine:{lineStyle:{color:'#334155'}} },
+                yAxis: { type:'value', splitLine:{lineStyle:{color:'#1e293b',type:'dashed'}}, axisLabel:{fontSize:9} },
+                series: [
+                    { name:'格子数', type:'bar', data:bins.map((b,i)=>({
+                        value:b.count,
+                        itemStyle:{color: i>=threshBin ? 'rgba(239,68,68,0.75)' : 'rgba(22,163,74,0.65)', borderRadius:[3,3,0,0]}
+                    })),
+                      markLine:{symbol:['none','none'],data:[{xAxis:threshBin-0.5}],
+                        lineStyle:{color:'#f59e0b',type:'dashed',width:2},
+                        label:{show:true,formatter:`阈值=${threshold.toFixed(2)}`,color:'#f59e0b',fontSize:9}}
+                    },
+                    { name:'Ground Truth', type:'bar', data:bins.map(b=>({value:b.hits, itemStyle:{color:'rgba(251,191,36,0.85)',borderRadius:[3,3,0,0]}})), barGap:'-100%', barMaxWidth:6 }
+                ]
+            }), [bins, threshBin, threshold]);
+
+            return (
+                <div className="flex-1 flex flex-col pt-1">
+                    <div className="flex justify-between items-center text-xs mb-1">
+                        <span className="text-textMuted">T={currentTime} 风险分布</span>
+                        <span className="flex gap-2">
+                            <span style={{color:'rgba(22,163,74,0.9)'}}>■ 安全</span>
+                            <span style={{color:'rgba(239,68,68,0.9)'}}>■ 高危</span>
+                            <span style={{color:'rgba(251,191,36,0.9)'}}>■ GT</span>
+                        </span>
+                    </div>
+                    <ReactECharts option={option} className="w-full flex-1 min-h-[220px]" />
+                </div>
+            );
+        });
+
+
+        // =====================================================
+        // 功能D: 增强版区域详情面板（GT时序叠加 + T-1/T/T+1对比）
+        // =====================================================
+        const DetailPanel = memo(({ areaData, currentTime, timeCount }) => {
             if (!areaData) {
                 return (
                     <div className="bg-panelBg rounded border border-borderBorder p-4 flex-1 flex flex-col justify-center items-center text-textMuted">
-                        <p>请点击左侧热力图网格查看详情</p>
+                        <p className="text-sm">请点击左侧热力图网格</p>
+                        <p className="text-xs mt-1 opacity-60">查看区域深度分析</p>
                     </div>
                 );
             }
@@ -571,43 +722,77 @@
             const currentRisk = sigmoid(areaData.flowSeries[currentTime]);
             const isHit = areaData.labelSeries[currentTime] === 1;
             const trendData = areaData.flowSeries.map(v => sigmoid(v));
+            const gtData = areaData.labelSeries.map(v => v===1 ? 1 : 0);
+            const tc = trendData.length;
 
+            // 增强趋势图：同时显示预测风险 + GT标签
             const trendOption = {
-                grid: { top: 10, bottom: 20, left: 25, right: 10 },
-                xAxis: { type: 'category', show: false, data: Array.from({length: trendData.length}, (_, i) => i) },
-                yAxis: { type: 'value', min: 0, max: 1, splitLine: { show: false } },
-                series: [{ 
-                    type: 'line', data: trendData, smooth: true, itemStyle: { color: '#ef4444' }, areaStyle: { color: 'rgba(239,68,68,0.2)' },
-                    markPoint: {
-                        data: [{ coord: [currentTime, trendData[currentTime]], itemStyle: { color: '#06b6d4' } }],
-                        symbolSize: 10
-                    }
-                }],
-                animationDurationUpdate: 300
+                grid: { top:8, bottom:18, left:28, right:8 },
+                xAxis: { type:'category', data:Array.from({length:tc},(_,i)=>i),
+                    axisLine:{lineStyle:{color:'#334155'}}, axisLabel:{fontSize:8,color:'#64748b'} },
+                yAxis: { type:'value', min:0, max:1, splitLine:{show:false}, axisLabel:{fontSize:8} },
+                tooltip: { trigger:'axis', formatter: p => `T=${p[0].name}<br/>风险:${(p[0].value*100).toFixed(1)}%${p[1]&&p[1].value?' <b style="color:#fbbf24">⚠️ 碰撞</b>':''}` },
+                series: [
+                    { type:'line', data:trendData, smooth:true, itemStyle:{color:'#ef4444'}, lineStyle:{width:2},
+                      areaStyle:{color:'rgba(239,68,68,0.15)'},
+                      markPoint:{ data:[{coord:[currentTime,trendData[currentTime]],itemStyle:{color:'#06b6d4'},symbolSize:10}] }
+                    },
+                    { type:'bar', data:gtData.map((v,i)=>({value:v*0.95, itemStyle:{color:'rgba(251,191,36,0.7)'}})),
+                      barMaxWidth:6, z:0, name:'Ground Truth' }
+                ],
+                animationDurationUpdate:300
             };
 
+            // T-1 / T / T+1 三格对比
+            const riskColor = (v) => {
+                if(v>=0.7) return '#dc2626'; if(v>=0.5) return '#f97316';
+                if(v>=0.35) return '#eab308'; if(v>=0.2) return '#84cc16'; return '#16a34a';
+            };
+            const neighbors = [-1,0,1].map(delta => {
+                const t = Math.max(0, Math.min(tc-1, currentTime+delta));
+                const risk = trendData[t];
+                const hit = areaData.labelSeries[t]===1;
+                return { t, risk, hit, delta };
+            });
+
             return (
-                <div className="bg-panelBg rounded border border-borderBorder p-4 flex-1 flex flex-col gap-3">
-                    <h3 className="font-bold border-b border-borderBorder pb-1 text-primary">网格感知 ({areaData.x}, {areaData.y})</h3>
-                    <div>
-                        <div className="text-sm text-textMuted mb-1">当前时刻预测风险</div>
-                        <div className={`text-2xl font-bold ${currentRisk > 0.5 ? 'text-danger' : 'text-primary'}`}>
-                            {(currentRisk * 100).toFixed(1)}%
+                <div className="bg-panelBg rounded border border-borderBorder p-3 flex-1 flex flex-col gap-2" style={{minHeight:0}}>
+                    <h3 className="font-bold border-b border-borderBorder pb-1 text-primary text-sm">
+                        🔍 网格 ({areaData.x}, {areaData.y}) 深度分析
+                    </h3>
+                    {/* 当前风险 + 状态 */}
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <div className="text-xs text-textMuted">当前风险 T={currentTime}</div>
+                            <div className={`text-xl font-bold`} style={{color:riskColor(currentRisk)}}>
+                                {(currentRisk*100).toFixed(1)}%
+                            </div>
+                        </div>
+                        <div className="text-right">
+                            {isHit ? <span className="text-amber-400 font-bold text-xs">⚠️ 碰撞发生</span>
+                                   : <span className="text-green-400 text-xs">✅ 安全</span>}
                         </div>
                     </div>
-                    <div className="h-24">
-                        <ReactECharts option={trendOption} className="w-full h-full" />
+                    {/* T-1 / T / T+1 时刻对比 */}
+                    <div className="flex gap-1">
+                        {neighbors.map(n=>(
+                            <div key={n.delta} style={{flex:1, textAlign:'center', padding:'5px 3px', borderRadius:'6px',
+                                background: n.delta===0?'rgba(6,182,212,0.12)':'rgba(17,24,39,0.5)',
+                                border: n.delta===0?'1px solid rgba(6,182,212,0.4)':'1px solid rgba(51,65,85,0.3)'}}>
+                                <div style={{fontSize:'9px',color:'#64748b'}}>{n.delta<0?`T-${-n.delta}`:n.delta===0?'T=当前':`T+${n.delta}`}</div>
+                                <div style={{fontSize:'15px',fontWeight:'800',color:riskColor(n.risk)}}>{(n.risk*100).toFixed(0)}%</div>
+                                {n.hit&&<div style={{fontSize:'9px',color:'#fbbf24'}}>⚠️</div>}
+                            </div>
+                        ))}
                     </div>
-                    <div className="mt-auto p-2 rounded text-sm border border-borderBorder/50 bg-[#0b1120]">
-                        {isHit ? (
-                            <span className="text-amber-400 font-bold text-xs">⚠️ 该区域正发生真实碰撞</span>
-                        ) : (
-                            <span className="text-green-400 text-xs">✅ 该区域当前无碰撞记录</span>
-                        )}
+                    {/* 增强趋势图：风险 + GT叠加 */}
+                    <div style={{height:'90px',flexShrink:0}}>
+                        <ReactECharts option={trendOption} className="w-full h-full" />
                     </div>
                 </div>
             );
         });
+
 
         const ActiveAlerts = memo(({ gridRaw, currentTime, threshold }) => {
             const alerts = useMemo(() => {
@@ -651,10 +836,11 @@
             const [isPlaying, setIsPlaying] = useState(false);
             const [threshold, setThreshold] = useState(0.50);
             const [activeLeftTab, setActiveLeftTab] = useState(0);
-            // 新功能状态
-            const [activeRightTab, setActiveRightTab] = useState(0);  // 0=区域详情 1=混淆矩阵
-            const [showTPFP, setShowTPFP] = useState(false);           // 功能4: TP/FP/FN 标注
-            const [compareMode, setCompareMode] = useState(false);     // 功能3: 双城对比
+            const [activeRightTab, setActiveRightTab] = useState(0);  // 0=区域详情 1=混淆矩阵 2=风险分布
+            const [showTPFP, setShowTPFP] = useState(false);
+            const [compareMode, setCompareMode] = useState(false);
+            const [snapFlash, setSnapFlash] = useState(false);        // 功能E: 截图闪烁效果
+            const dashboardRef = React.useRef(null);
 
             useEffect(() => { fetchExperimentData().then(res => setData(res)); }, []);
             useEffect(() => {
@@ -662,6 +848,49 @@
                 if (isPlaying && data) { interval = setInterval(() => setCurrentTime(prev => (prev+1)%data.timeCount), 800); }
                 return () => clearInterval(interval);
             }, [isPlaying, data]);
+
+            // 功能B: 键盘快捷键
+            useEffect(() => {
+                if (!data) return;
+                const handler = (e) => {
+                    if (e.target.tagName==='INPUT') return;
+                    switch(e.key) {
+                        case ' ': e.preventDefault(); setIsPlaying(p => !p); break;
+                        case 'ArrowRight': e.preventDefault(); setIsPlaying(false); setCurrentTime(t => Math.min(data.timeCount-1, t+1)); break;
+                        case 'ArrowLeft':  e.preventDefault(); setIsPlaying(false); setCurrentTime(t => Math.max(0, t-1)); break;
+                        case '+': case '=': setThreshold(t => Math.min(0.9, parseFloat((t+0.05).toFixed(2)))); break;
+                        case '-': setThreshold(t => Math.max(0.1, parseFloat((t-0.05).toFixed(2)))); break;
+                        case 'c': case 'C': setCompareMode(p => !p); break;
+                        case 't': case 'T': setShowTPFP(p => !p); break;
+                    }
+                };
+                window.addEventListener('keydown', handler);
+                return () => window.removeEventListener('keydown', handler);
+            }, [data]);
+
+            // 功能E: 截图导出
+            const handleScreenshot = useCallback(async () => {
+                if (!dashboardRef.current) return;
+                setSnapFlash(true);
+                setTimeout(() => setSnapFlash(false), 400);
+                try {
+                    const canvas = await html2canvas(dashboardRef.current, {
+                        backgroundColor: '#0b1120', scale: 1.5, useCORS: true, logging: false
+                    });
+                    const link = document.createElement('a');
+                    link.download = `traffic_risk_dashboard_T${currentTime}.png`;
+                    link.href = canvas.toDataURL('image/png');
+                    link.click();
+                } catch(e) {
+                    // 降级：SVG截图
+                    const svgEl = dashboardRef.current.querySelector('svg');
+                    if (svgEl) {
+                        const blob = new Blob([svgEl.outerHTML], {type:'image/svg+xml'});
+                        const url = URL.createObjectURL(blob);
+                        const link = document.createElement('a'); link.download='heatmap.svg'; link.href=url; link.click();
+                    }
+                }
+            }, [currentTime]);
 
             const handleDatasetSwitch = (newId) => {
                 setDatasetId(newId); setSelectedArea(null); setCurrentTime(0); setIsPlaying(false); setCompareMode(false);
@@ -684,6 +913,7 @@
             }, [gridRaw]);
 
             if (!data) return <div className="flex items-center justify-center h-screen text-xl text-primary animate-pulse">正在加载双城市真实数据流...</div>;
+
 
             // 功能3: 双城对比布局
             const CompareView = () => (
@@ -708,57 +938,62 @@
             );
 
             return (
-                <div className="flex flex-col gap-4 h-full min-h-[95vh]">
+                <div ref={dashboardRef} className="flex flex-col gap-4 h-full min-h-[95vh]" style={{position:'relative'}}>
+                    {/* 功能E: 截图闪光效果 */}
+                    {snapFlash && <div style={{position:'fixed',inset:0,background:'rgba(255,255,255,0.15)',zIndex:9999,pointerEvents:'none',borderRadius:'8px'}} className="snap-flash"/>}
+
                     {/* Header */}
-                    <header className="glass-panel px-6 py-4 flex justify-between items-center">
-                        <div className="flex items-center gap-4 flex-wrap">
+                    <header className="glass-panel px-6 py-3 flex justify-between items-center">
+                        <div className="flex items-center gap-3 flex-wrap">
                             <div>
-                                <h1 className="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-500">
+                                <h1 className="text-xl font-black bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-500">
                                     深度时空自适应风险预警平台 (Myplan)
                                 </h1>
-                                <p className="text-sm text-textMuted mt-1 flex items-center gap-2">
-                                    支持多城市双轨数据推演结果
+                                <p className="text-xs text-textMuted mt-0.5 flex items-center gap-2">
+                                    支持多城市双轨数据推演
                                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${data.isDemo?'bg-amber-500/10 text-amber-400 border-amber-500/30':'bg-green-500/10 text-green-400 border-green-500/30'}`}>
-                                        {data.isDemo?"⚠ 备用数据模式":"✅ 成功挂载 frontend_real_data.json"}
+                                        {data.isDemo?"⚠ 备用数据模式":"✅ frontend_real_data.json"}
                                     </span>
                                 </p>
                             </div>
                             {/* 城市切换 */}
-                            {!compareMode && <div className="ml-2 flex bg-panelBg rounded-lg p-1 border border-borderBorder">
-                                <button onClick={()=>handleDatasetSwitch('nyc')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${datasetId==='nyc'?'bg-primary text-darkBg shadow':'text-textMuted hover:text-textMain'}`}>🗽 New York</button>
-                                <button onClick={()=>handleDatasetSwitch('chicago')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${datasetId==='chicago'?'bg-secondary text-darkBg shadow':'text-textMuted hover:text-textMain'}`}>🏙️ Chicago</button>
+                            {!compareMode && <div className="flex bg-panelBg rounded-lg p-1 border border-borderBorder">
+                                <button onClick={()=>handleDatasetSwitch('nyc')} className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${datasetId==='nyc'?'bg-primary text-darkBg shadow':'text-textMuted hover:text-textMain'}`}>🗽 NYC</button>
+                                <button onClick={()=>handleDatasetSwitch('chicago')} className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${datasetId==='chicago'?'bg-secondary text-darkBg shadow':'text-textMuted hover:text-textMain'}`}>🏙️ Chicago</button>
                             </div>}
-                            {/* 功能3: 双城对比按钮 */}
-                            <button onClick={()=>setCompareMode(!compareMode)}
-                                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${compareMode?'bg-secondary/20 text-secondary border-secondary/50':'bg-panelBg text-textMuted border-borderBorder hover:text-secondary hover:border-secondary/40'}`}>
-                                {compareMode?'✖ 退出对比':'⚖ 双城对比'}
+                            {/* 功能按钮组 */}
+                            <button onClick={()=>setCompareMode(!compareMode)} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all ${compareMode?'bg-secondary/20 text-secondary border-secondary/50':'bg-panelBg text-textMuted border-borderBorder hover:text-secondary'}`}>
+                                {compareMode?'✖ 退出对比':'⚖ 双城对比'} <kbd className="kbd-hint">C</kbd>
                             </button>
-                            {/* 功能4: TP/FP/FN 标注切换 */}
-                            <button onClick={()=>setShowTPFP(!showTPFP)}
-                                className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all ${showTPFP?'bg-amber-500/20 text-amber-400 border-amber-500/50':'bg-panelBg text-textMuted border-borderBorder hover:text-amber-400 hover:border-amber-500/40'}`}>
-                                {showTPFP?'✖ 关闭标注':'🏷 TP/FP/FN标注'}
+                            <button onClick={()=>setShowTPFP(!showTPFP)} className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-all ${showTPFP?'bg-amber-500/20 text-amber-400 border-amber-500/50':'bg-panelBg text-textMuted border-borderBorder hover:text-amber-400'}`}>
+                                {showTPFP?'✖ 关闭标注':'🏷 TP/FP/FN'} <kbd className="kbd-hint">T</kbd>
+                            </button>
+                            {/* 功能E: 截图按钮 */}
+                            <button onClick={handleScreenshot} className="px-2.5 py-1.5 rounded-lg text-xs font-bold border bg-panelBg text-textMuted border-borderBorder hover:text-cyan-400 hover:border-cyan-400/50 transition-all">
+                                📸 截图导出
                             </button>
                         </div>
 
-                        <div className="flex flex-col items-end gap-3">
+                        <div className="flex flex-col items-end gap-2">
                             <div className="flex items-center gap-3 text-sm text-textMuted bg-panelBg px-3 py-1.5 rounded border border-borderBorder">
-                                <span>⚠️ 预警阈值: <span className="font-bold text-primary">{threshold.toFixed(2)}</span></span>
+                                <span className="text-xs">⚠️ 阈值: <span className="font-bold text-primary">{threshold.toFixed(2)}</span></span>
                                 <input type="range" min="0.1" max="0.9" step="0.05" value={threshold}
-                                    onChange={e=>setThreshold(parseFloat(e.target.value))} className="w-28 accent-primary cursor-pointer"/>
+                                    onChange={e=>setThreshold(parseFloat(e.target.value))} className="w-24 accent-primary cursor-pointer"/>
+                                <span className="text-xs text-borderBorder"><kbd className="kbd-hint">+</kbd><kbd className="kbd-hint">-</kbd></span>
                             </div>
-                            <div className="text-sm text-textMuted font-mono flex items-center gap-3">
+                            <div className="text-sm font-mono flex items-center gap-2">
                                 <button onClick={()=>setIsPlaying(!isPlaying)}
-                                    className={`px-3 py-1 rounded font-bold transition-all ${isPlaying?'bg-danger text-white animate-play-pulse':'bg-primary text-darkBg hover:bg-primary/80'}`}>
-                                    {isPlaying?'⏸ 停止播放':'▶ 自动演变'}
+                                    className={`px-3 py-1 rounded font-bold text-xs transition-all ${isPlaying?'bg-danger text-white animate-play-pulse':'bg-primary text-darkBg hover:bg-primary/80'}`}>
+                                    {isPlaying?'⏸ 停止':'▶ 演变'} <kbd className="kbd-hint" style={{background:'rgba(0,0,0,0.2)',border:'1px solid rgba(255,255,255,0.2)',color:'rgba(255,255,255,0.7)'}}>Space</kbd>
                                 </button>
-                                <div className="flex gap-1 ml-2">
+                                <div className="flex gap-1">
                                     <button onClick={()=>{setIsPlaying(false);setCurrentTime(Math.max(0,currentTime-1));}}
-                                        className="bg-panelBg border border-borderBorder px-2 py-1 rounded text-textMuted hover:text-primary disabled:opacity-50" disabled={currentTime===0}>◀</button>
-                                    <span className="bg-panelBg border border-borderBorder px-3 py-1 rounded">
-                                        T = {currentTime} <span className="text-xs text-borderBorder">/ {data.timeCount-1}</span>
+                                        className="bg-panelBg border border-borderBorder px-2 py-1 rounded text-textMuted hover:text-primary disabled:opacity-40 text-xs" disabled={currentTime===0}>◀ <kbd className="kbd-hint">←</kbd></button>
+                                    <span className="bg-panelBg border border-borderBorder px-3 py-1 rounded text-xs">
+                                        T={currentTime}<span className="text-borderBorder">/{data.timeCount-1}</span>
                                     </span>
                                     <button onClick={()=>{setIsPlaying(false);setCurrentTime(Math.min(data.timeCount-1,currentTime+1));}}
-                                        className="bg-panelBg border border-borderBorder px-2 py-1 rounded text-textMuted hover:text-primary disabled:opacity-50" disabled={currentTime===data.timeCount-1}>▶</button>
+                                        className="bg-panelBg border border-borderBorder px-2 py-1 rounded text-textMuted hover:text-primary disabled:opacity-40 text-xs" disabled={currentTime===data.timeCount-1}><kbd className="kbd-hint">→</kbd> ▶</button>
                                 </div>
                             </div>
                         </div>
@@ -766,38 +1001,48 @@
 
                     {/* 指标卡 */}
                     <div className="grid grid-cols-4 gap-4">
-                        <MetricCard title={`触发预警网格数 (阈值>${threshold.toFixed(2)})`} value={currentHighRiskCount} isDanger={true} subtext="随时间切片与阈值实时跳动"/>
+                        <MetricCard title={`触发预警网格数 (>${threshold.toFixed(2)})`} value={currentHighRiskCount} isDanger={true} subtext="随时间切片与阈值实时跳动"/>
                         <MetricCard title="全局 Recall 召回率" value={currentMetricsInfo.recall} subtext="相较基线显著提升"/>
                         <MetricCard title="全局 F1 Score" value={currentMetricsInfo.f1} subtext="Myplan 完整模型打分"/>
-                        <MetricCard title="核心评价指标 (AUC-PR)" value={currentMetricsInfo.mainMetricValue} subtext={`基于 ${compareMode?'NYC+CHI':datasetId.toUpperCase()} 测试集`}/>
+                        <MetricCard title="核心指标 AUC-PR" value={currentMetricsInfo.mainMetricValue} subtext={`基于 ${compareMode?'NYC+CHI':datasetId.toUpperCase()} 测试集`}/>
                     </div>
 
                     {/* 主布局 */}
                     {compareMode ? (
-                        /* 功能3: 双城并排对比 */
                         <div className="flex gap-4 flex-1" style={{minHeight:'520px'}}>
                             <div className="w-72 flex flex-col glass-panel p-4 overflow-y-auto custom-scrollbar">
-                                <h3 className="text-sm font-bold text-textMuted mb-3 border-b border-borderBorder pb-2">双城同步状态</h3>
-                                <div className="mb-3">
-                                    <div className="text-xs text-primary font-bold mb-1">🗽 NYC 混淆矩阵</div>
-                                    <ConfusionMatrix gridRaw={nycGrid} currentTime={currentTime} threshold={threshold}/>
+                                <h3 className="text-xs font-bold text-textMuted mb-3 border-b border-borderBorder pb-2">双城同步混淆矩阵</h3>
+                                <div className="mb-3"><div className="text-xs text-primary font-bold mb-1">🗽 NYC</div><ConfusionMatrix gridRaw={nycGrid} currentTime={currentTime} threshold={threshold}/></div>
+                                <div className="mt-3 border-t border-borderBorder pt-3"><div className="text-xs text-secondary font-bold mb-1">🏙️ Chicago</div><ConfusionMatrix gridRaw={chiGrid} currentTime={currentTime} threshold={threshold}/></div>
+                            </div>
+                            {/* CompareView inline */}
+                            <div className="flex gap-3 flex-1">
+                                <div className="flex-1 glass-panel p-3 flex flex-col">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                                        <span className="font-bold text-sm">🗽 New York City</span>
+                                        <span className="text-xs text-textMuted ml-auto">AUC-PR: {METRICS_DATA.nyc.mainMetricValue}</span>
+                                    </div>
+                                    <SVGHeatmap gridRaw={nycGrid} currentTime={currentTime} onAreaClick={handleAreaClick} threshold={threshold} showTPFP={showTPFP}/>
                                 </div>
-                                <div className="mt-3 border-t border-borderBorder pt-3">
-                                    <div className="text-xs text-secondary font-bold mb-1">🏙️ Chicago 混淆矩阵</div>
-                                    <ConfusionMatrix gridRaw={chiGrid} currentTime={currentTime} threshold={threshold}/>
+                                <div className="flex-1 glass-panel p-3 flex flex-col">
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="w-2 h-2 rounded-full bg-secondary animate-pulse"></span>
+                                        <span className="font-bold text-sm">🏙️ Chicago</span>
+                                        <span className="text-xs text-textMuted ml-auto">AUC-PR: {METRICS_DATA.chicago.mainMetricValue}</span>
+                                    </div>
+                                    <SVGHeatmap gridRaw={chiGrid} currentTime={currentTime} onAreaClick={(x,y)=>{const area=chiGrid.find(g=>g.x===x&&g.y===y);setSelectedArea(area);}} threshold={threshold} showTPFP={showTPFP}/>
                                 </div>
                             </div>
-                            <CompareView />
                         </div>
                     ) : (
-                        /* 正常单城市布局 */
                         <div className="flex gap-4 flex-1 h-[520px]">
-                            {/* 左侧面板 - 4个Tab */}
-                            <div className="w-1/4 flex flex-col glass-panel p-4">
-                                <div className="flex border-b border-borderBorder mb-2 overflow-x-auto">
-                                    {['基线对比','消融实验','全局趋势','持久风险'].map((t,i)=>(
+                            {/* 左侧面板 - 5个Tab */}
+                            <div className="w-1/4 flex flex-col glass-panel p-3">
+                                <div className="flex border-b border-borderBorder mb-2 overflow-x-auto gap-0.5">
+                                    {['基线对比','消融实验','全局趋势','持久风险','PR曲线'].map((t,i)=>(
                                         <button key={i}
-                                            className={`flex-shrink-0 px-2 pb-2 text-xs font-bold transition-colors ${activeLeftTab===i?'text-primary border-b-2 border-primary':'text-textMuted hover:text-textMain'}`}
+                                            className={`flex-shrink-0 px-2 pb-1.5 text-[10px] font-bold transition-colors ${activeLeftTab===i?'text-primary border-b-2 border-primary':'text-textMuted hover:text-textMain'}`}
                                             onClick={()=>setActiveLeftTab(i)}>{t}</button>
                                     ))}
                                 </div>
@@ -806,51 +1051,64 @@
                                     {activeLeftTab===1 && <AblationStudy ablationData={currentMetricsInfo.ablation}/>}
                                     {activeLeftTab===2 && <GlobalTrend gridRaw={gridRaw} currentTime={currentTime} timeCount={data.timeCount} threshold={threshold}/>}
                                     {activeLeftTab===3 && <PersistenceMap gridRaw={gridRaw}/>}
+                                    {activeLeftTab===4 && <PRCurveChart nycGrid={nycGrid} chiGrid={chiGrid} threshold={threshold} timeCount={data.timeCount}/>}
                                 </div>
                             </div>
 
-                            {/* 中央热力图 */}
+                            {/* 中央热力图 + 功能B: 时间进度条 */}
                             <div className="glass-panel p-4 flex-1 flex flex-col">
                                 <div className="flex justify-between items-center mb-2">
-                                    <h3 className="text-lg font-bold text-textMain flex items-center gap-2">
+                                    <h3 className="text-base font-bold text-textMain flex items-center gap-2">
                                         <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
                                         {datasetId==='nyc'?'纽约 New York City':'芝加哥 Chicago'} · 时空风险热力网格
                                     </h3>
                                     <div className="flex items-center gap-2">
-                                        {showTPFP && (
-                                            <div className="flex items-center gap-2 text-xs bg-panelBg px-2 py-1 rounded border border-borderBorder">
-                                                <span style={{color:'#22c55e'}}>✓ TP</span>
-                                                <span style={{color:'#eab308'}}>! FP</span>
-                                                <span style={{color:'#ef4444'}}>✗ FN</span>
-                                            </div>
-                                        )}
-                                        {!showTPFP && <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-400/10 px-2 py-1 rounded border border-amber-400/30">
-                                            <div className="w-3 h-3 rounded-full border-2 border-amber-400 shadow-[0_0_6px_#fbbf24]"></div>
+                                        {showTPFP && <div className="flex items-center gap-2 text-xs bg-panelBg px-2 py-1 rounded border border-borderBorder">
+                                            <span style={{color:'#22c55e'}}>✓ TP</span>
+                                            <span style={{color:'#eab308'}}>! FP</span>
+                                            <span style={{color:'#ef4444'}}>✗ FN</span>
+                                        </div>}
+                                        {!showTPFP && <div className="flex items-center gap-1 text-xs text-amber-400 bg-amber-400/10 px-2 py-1 rounded border border-amber-400/30">
+                                            <div className="w-2.5 h-2.5 rounded-full border-2 border-amber-400"></div>
                                             <span>金色圆圈 = 真实碰撞</span>
                                         </div>}
                                     </div>
                                 </div>
                                 <SVGHeatmap gridRaw={gridRaw} currentTime={currentTime} onAreaClick={handleAreaClick} threshold={threshold} showTPFP={showTPFP}/>
+                                {/* 功能B: 时间轴进度条 */}
+                                <div className="mt-2 px-1">
+                                    <input type="range" min="0" max={data.timeCount-1} step="1" value={currentTime}
+                                        className="time-slider"
+                                        style={{'--pct':`${(currentTime/(data.timeCount-1)*100).toFixed(1)}%`}}
+                                        onChange={e=>{setIsPlaying(false);setCurrentTime(parseInt(e.target.value));}}
+                                    />
+                                    <div className="flex justify-between text-[10px] text-borderBorder mt-0.5">
+                                        <span>T=0</span>
+                                        <span className="text-primary font-bold">T={currentTime} — 可拖拽</span>
+                                        <span>T={data.timeCount-1}</span>
+                                    </div>
+                                </div>
                             </div>
 
-                            {/* 右侧面板 - 2个Tab */}
+                            {/* 右侧面板 - 3个Tab */}
                             <div className="w-80 flex flex-col glass-panel p-4">
-                                <div className="flex border-b border-borderBorder mb-3">
-                                    {['区域详情','混淆矩阵'].map((t,i)=>(
+                                <div className="flex border-b border-borderBorder mb-3 gap-0.5">
+                                    {['区域详情','混淆矩阵','风险分布'].map((t,i)=>(
                                         <button key={i}
-                                            className={`flex-1 pb-2 text-sm font-bold transition-colors ${activeRightTab===i?'text-primary border-b-2 border-primary':'text-textMuted hover:text-textMain'}`}
+                                            className={`flex-1 pb-2 text-xs font-bold transition-colors ${activeRightTab===i?'text-primary border-b-2 border-primary':'text-textMuted hover:text-textMain'}`}
                                             onClick={()=>setActiveRightTab(i)}>{t}</button>
                                     ))}
                                 </div>
                                 {activeRightTab===0 && <>
-                                    <DetailPanel areaData={selectedArea} currentTime={currentTime}/>
+                                    <DetailPanel areaData={selectedArea} currentTime={currentTime} timeCount={data.timeCount}/>
                                     <ActiveAlerts gridRaw={gridRaw} currentTime={currentTime} threshold={threshold}/>
                                 </>}
-                                {activeRightTab===1 && (
-                                    <div className="flex-1 overflow-y-auto custom-scrollbar">
-                                        <ConfusionMatrix gridRaw={gridRaw} currentTime={currentTime} threshold={threshold}/>
-                                    </div>
-                                )}
+                                {activeRightTab===1 && <div className="flex-1 overflow-y-auto custom-scrollbar">
+                                    <ConfusionMatrix gridRaw={gridRaw} currentTime={currentTime} threshold={threshold}/>
+                                </div>}
+                                {activeRightTab===2 && <div className="flex-1 flex flex-col">
+                                    <RiskHistogram gridRaw={gridRaw} currentTime={currentTime} threshold={threshold}/>
+                                </div>}
                             </div>
                         </div>
                     )}

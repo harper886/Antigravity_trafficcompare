@@ -37,10 +37,7 @@
     <!-- ECharts -->
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
     
-    <!-- Leaflet & ECharts-Leaflet Extension -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/echarts-extension-leaflet@1.0.1/dist/echarts-extension-leaflet.min.js"></script>
+    <!-- No external map dependency needed -->
 
     <style>
         body { background-color: #0b1120; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; overflow-x: hidden; }
@@ -137,29 +134,59 @@
         // ==========================================
         const { useEffect, useRef, useState, useMemo, useCallback, memo } = React;
 
-        const ReactECharts = memo(({ option, style, className, onClick }) => {
+        const ReactECharts = memo(({ option, style, className, onClick, onClickRef }) => {
             const chartRef = useRef(null);
             const chartInstance = useRef(null);
-            
+            const optionRef = useRef(option);
+            const onClickRefLocal = useRef(onClick);
+
+            // 始终保持最新的 option 和 onClick
+            useEffect(() => { optionRef.current = option; }, [option]);
+            useEffect(() => { onClickRefLocal.current = onClick; }, [onClick]);
+
+            // 初始化一次，用 ResizeObserver 监听尺寸
             useEffect(() => {
-                if (!chartInstance.current) {
-                    chartInstance.current = echarts.init(chartRef.current, 'dark', { background: 'transparent' });
-                }
-                const chart = chartInstance.current;
-                
-                chart.setOption(option, { notMerge: false, lazyUpdate: true });
-                
-                if (onClick) {
-                    chart.off('click');
-                    chart.on('click', onClick);
-                }
-                
-                const handleResize = () => chart.resize();
-                window.addEventListener('resize', handleResize);
-                return () => window.removeEventListener('resize', handleResize);
+                const container = chartRef.current;
+                if (!container) return;
+
+                const applyOption = () => {
+                    if (chartInstance.current && optionRef.current) {
+                        chartInstance.current.setOption(optionRef.current, { notMerge: true, lazyUpdate: false });
+                        if (onClickRefLocal.current) {
+                            chartInstance.current.off('click');
+                            chartInstance.current.on('click', onClickRefLocal.current);
+                        }
+                    }
+                };
+
+                const tryInit = () => {
+                    if (!chartInstance.current && container.clientWidth > 0 && container.clientHeight > 0) {
+                        chartInstance.current = echarts.init(container, 'dark', { background: 'transparent' });
+                        applyOption();
+                    }
+                };
+
+                const ro = new ResizeObserver(() => {
+                    tryInit();
+                    if (chartInstance.current) chartInstance.current.resize();
+                });
+                ro.observe(container);
+                tryInit();
+
+                return () => {
+                    ro.disconnect();
+                    if (chartInstance.current) { chartInstance.current.dispose(); chartInstance.current = null; }
+                };
+            }, []);
+
+            // option 或 onClick 变化时更新图表
+            useEffect(() => {
+                if (!chartInstance.current) return;
+                chartInstance.current.setOption(option, { notMerge: true, lazyUpdate: false });
+                if (onClick) { chartInstance.current.off('click'); chartInstance.current.on('click', onClick); }
             }, [option, onClick]);
 
-            return <div ref={chartRef} style={style} className={className} />;
+            return <div ref={chartRef} style={style || {}} className={className || ''} />;
         });
 
         // ==========================================
@@ -173,91 +200,131 @@
             </div>
         );
 
-        const MainVisualization = memo(({ gridRaw, currentTime, onAreaClick, datasetName }) => {
-            const heatmapData = useMemo(() => {
-                if(!gridRaw) return [];
+        // ============ SVG 热力图渲染器（最可靠方案）============
+        const SVGHeatmap = memo(({ gridRaw, currentTime, onAreaClick }) => {
+            const [tooltip, setTooltip] = useState(null);
+
+            const bounds = useMemo(() => {
+                if (!gridRaw || !gridRaw.length) return { xMin:0, xMax:9, yMin:0, yMax:9 };
+                const xs = gridRaw.map(g => g.x), ys = gridRaw.map(g => g.y);
+                return { xMin:Math.min(...xs), xMax:Math.max(...xs), yMin:Math.min(...ys), yMax:Math.max(...ys) };
+            }, [gridRaw]);
+
+            const W = 800, H = 400;
+            const PAD = { t:10, r:20, b:30, l:40 };
+            const plotW = W - PAD.l - PAD.r, plotH = H - PAD.t - PAD.b;
+            const { xMin, xMax, yMin, yMax } = bounds;
+            const cols = xMax - xMin + 1, rows = yMax - yMin + 1;
+            const cellW = plotW / cols, cellH = plotH / rows;
+
+            const riskToColor = useCallback((v) => {
+                const stops = [[0,'#0f172a'],[0.2,'#1e3a5f'],[0.4,'#1d4ed8'],[0.6,'#7c3aed'],[0.8,'#dc2626'],[1,'#ff4500']];
+                let lo=stops[0], hi=stops[stops.length-1];
+                for(let i=0;i<stops.length-1;i++){if(v>=stops[i][0]&&v<=stops[i+1][0]){lo=stops[i];hi=stops[i+1];break;}}
+                // 解析颜色并插值
+                const parse = c => [parseInt(c.slice(1,3),16),parseInt(c.slice(3,5),16),parseInt(c.slice(5,7),16)];
+                const [lr,lg,lb]=parse(lo[1]), [hr,hg,hb]=parse(hi[1]);
+                const t=lo[0]===hi[0]?0:(v-lo[0])/(hi[0]-lo[0]);
+                return `rgb(${Math.round(lr+(hr-lr)*t)},${Math.round(lg+(hg-lg)*t)},${Math.round(lb+(hb-lb)*t)})`;
+            }, []);
+
+            const cells = useMemo(() => {
+                if (!gridRaw) return [];
                 return gridRaw.map(g => {
-                    const geo = mapGridToGeo(datasetName, g.x, g.y);
-                    return [geo[0], geo[1], sigmoid(g.flowSeries[currentTime]), g.x, g.y];
+                    const risk = sigmoid(g.flowSeries[currentTime]);
+                    const cx = PAD.l + (g.x - xMin) * cellW;
+                    const cy = PAD.t + (rows - 1 - (g.y - yMin)) * cellH;
+                    return { x: g.x, y: g.y, risk, cx, cy, isHit: g.labelSeries[currentTime] === 1, flowSeries: g.flowSeries, labelSeries: g.labelSeries };
                 });
-            }, [gridRaw, currentTime, datasetName]);
+            }, [gridRaw, currentTime, bounds, cellW, cellH]);
 
-            const gtData = useMemo(() => {
-                if(!gridRaw) return [];
-                return gridRaw.filter(g => g.labelSeries[currentTime] === 1).map(g => {
-                    const geo = mapGridToGeo(datasetName, g.x, g.y);
-                    return [geo[0], geo[1], 1, g.x, g.y];
-                });
-            }, [gridRaw, currentTime, datasetName]);
-
-            const center = datasetName === 'nyc' ? [-74.01, 40.73] : [-87.63, 41.88];
-
-            const option = useMemo(() => ({
-                tooltip: { 
-                    position: 'top', 
-                    formatter: p => {
-                        const gx = p.data[3];
-                        const gy = p.data[4];
-                        if(p.seriesName === '风险分布') return `网格区域(${gx}, ${gy})<br/>预测风险值: ${(p.data[2]*100).toFixed(1)}%`;
-                        if(p.seriesName === 'Ground Truth') return `网格区域(${gx}, ${gy})<br/><span style="color:#fbbf24">⚠️ 此处发生真实碰撞</span>`;
-                    }
-                },
-                leaflet: {
-                    center: center,
-                    zoom: 11,
-                    roam: 'move', // 允许地图拖动平移
-                    tiles: [{
-                        urlTemplate: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-                    }]
-                },
-                visualMap: {
-                    min: 0, max: 1, calculable: true, orient: 'horizontal', left: 'center', bottom: 10,
-                    inRange: { color: ['#0f172a', '#3b82f6', '#8b5cf6', '#ef4444'] },
-                    textStyle: { color: '#f8fafc', fontWeight: 'bold' },
-                    seriesIndex: 0 
-                },
-                series: [
-                    {
-                        name: '风险分布', type: 'scatter', coordinateSystem: 'leaflet',
-                        data: heatmapData,
-                        symbol: 'rect',
-                        symbolSize: 32, // 固定方块大小，呈现网格状
-                        itemStyle: { opacity: 0.6, borderColor: 'rgba(255, 255, 255, 0.05)', borderWidth: 1 } // 半透明格式
-                    },
-                    {
-                        name: 'Ground Truth', type: 'scatter', coordinateSystem: 'leaflet',
-                        data: gtData,
-                        symbol: 'emptyCircle',
-                        symbolSize: 22,
-                        itemStyle: { color: '#fbbf24', borderWidth: 3, shadowColor: 'rgba(251, 191, 36, 0.8)', shadowBlur: 10 },
-                        z: 10 
-                    }
-                ],
-                animationDurationUpdate: 300 
-            }), [heatmapData, gtData, center]);
-
-            const handleClick = useCallback((params) => {
-                if(params && params.data && params.data.length >= 5) {
-                    onAreaClick(params.data[3], params.data[4]); 
-                }
-            }, [onAreaClick]);
+            const handleCellClick = useCallback((cell) => { onAreaClick(cell.x, cell.y); }, [onAreaClick]);
+            const handleMouseEnter = useCallback((cell, e) => {
+                setTooltip({ x: cell.x, y: cell.y, risk: (cell.risk*100).toFixed(1), isHit: cell.isHit, px: e.clientX, py: e.clientY });
+            }, []);
+            const handleMouseMove = useCallback((e) => {
+                setTooltip(t => t ? {...t, px: e.clientX, py: e.clientY} : null);
+            }, []);
 
             return (
-                <div className="glass-panel p-4 flex-1 flex flex-col relative overflow-hidden">
-                    <div className="flex justify-between items-center mb-2 relative z-20">
+                <div style={{position:'relative', width:'100%', marginTop:'0.5rem'}}>
+                    <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%', display:'block', borderRadius:'0.75rem', border:'1px solid rgba(51,65,85,0.5)', background:'#0d1526'}}
+                        onMouseLeave={() => setTooltip(null)}>
+                        {/* 格子 */}
+                        {cells.map((c, i) => (
+                            <rect key={i}
+                                x={c.cx + 1} y={c.cy + 1} width={cellW - 2} height={cellH - 2}
+                                fill={riskToColor(c.risk)} fillOpacity={0.9}
+                                stroke={c.risk > 0.7 ? 'rgba(239,68,68,0.7)' : 'rgba(51,65,85,0.3)'} strokeWidth={c.risk > 0.7 ? 1.5 : 0.5}
+                                style={{cursor:'pointer', transition:'fill 0.4s ease'}}
+                                onClick={() => handleCellClick(c)}
+                                onMouseEnter={(e) => handleMouseEnter(c, e)}
+                                onMouseMove={handleMouseMove}
+                            />
+                        ))}
+                        {/* Ground Truth 金色圆圈 */}
+                        {cells.filter(c => c.isHit).map((c, i) => (
+                            <circle key={i}
+                                cx={c.cx + cellW/2} cy={c.cy + cellH/2}
+                                r={Math.min(cellW, cellH)*0.32}
+                                fill="none" stroke="#fbbf24" strokeWidth={2.5}
+                                style={{filter:'drop-shadow(0 0 6px rgba(251,191,36,0.9))'}}
+                            />
+                        ))}
+                        {/* 网格线 */}
+                        {Array.from({length:cols+1},(_,i) => (
+                            <line key={'vl'+i} x1={PAD.l+i*cellW} y1={PAD.t} x2={PAD.l+i*cellW} y2={PAD.t+plotH} stroke="rgba(51,65,85,0.25)" strokeWidth={0.5}/>
+                        ))}
+                        {Array.from({length:rows+1},(_,j) => (
+                            <line key={'hl'+j} x1={PAD.l} y1={PAD.t+j*cellH} x2={PAD.l+plotW} y2={PAD.t+j*cellH} stroke="rgba(51,65,85,0.25)" strokeWidth={0.5}/>
+                        ))}
+                        {/* 轴标签 */}
+                        {Array.from({length:cols},(_,i) => i%2===0 && (
+                            <text key={'xl'+i} x={PAD.l+i*cellW+cellW/2} y={H-8} textAnchor="middle" fontSize={10} fill="#475569">{xMin+i}</text>
+                        ))}
+                        {Array.from({length:rows},(_,j) => j%2===0 && (
+                            <text key={'yl'+j} x={PAD.l-4} y={PAD.t+j*cellH+cellH/2} textAnchor="end" dominantBaseline="middle" fontSize={10} fill="#475569">{yMax-j}</text>
+                        ))}
+                        {/* 图例 */}
+                        <defs>
+                            <linearGradient id="riskGrad" x1="0" x2="1" y1="0" y2="0">
+                                <stop offset="0%" stopColor="#0f172a"/>
+                                <stop offset="40%" stopColor="#1d4ed8"/>
+                                <stop offset="60%" stopColor="#7c3aed"/>
+                                <stop offset="80%" stopColor="#dc2626"/>
+                                <stop offset="100%" stopColor="#ff4500"/>
+                            </linearGradient>
+                        </defs>
+                        <rect x={W/2-60} y={H-22} width={120} height={10} rx={5} fill="url(#riskGrad)"/>
+                        <text x={W/2-65} y={H-14} textAnchor="end" fontSize={10} fill="#64748b">低风险</text>
+                        <text x={W/2+65} y={H-14} textAnchor="start" fontSize={10} fill="#64748b">高风险</text>
+                    </svg>
+                    {tooltip && (
+                        <div style={{position:'fixed',left:tooltip.px+12,top:tooltip.py+12,background:'rgba(11,17,32,0.97)',border:'1px solid #334155',borderRadius:'6px',padding:'8px 12px',fontSize:'12px',color:'#f8fafc',zIndex:9999,pointerEvents:'none',lineHeight:'1.7'}}>
+                            <b>网格 ({tooltip.x}, {tooltip.y})</b><br/>
+                            风险: <b style={{color:parseFloat(tooltip.risk)>50?'#ef4444':'#06b6d4'}}>{tooltip.risk}%</b>
+                            {tooltip.isHit && <><br/><span style={{color:'#fbbf24'}}>⚠️ 真实碰撞发生</span></>}
+                        </div>
+                    )}
+                </div>
+            );
+        });
+
+        const MainVisualization = memo(({ gridRaw, currentTime, onAreaClick, datasetName }) => {
+            const cityLabel = datasetName === 'nyc' ? '纽约 New York City' : '芝加哥 Chicago';
+            return (
+                <div className="glass-panel p-4 flex-1 flex flex-col">
+                    <div className="flex justify-between items-center mb-2">
                         <h3 className="text-lg font-bold text-textMain flex items-center gap-2">
                             <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
-                            {datasetName.toUpperCase()} 城市地理预警网格 (支持拖拽)
+                            {cityLabel} · 时空风险热力网格
                         </h3>
                         <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-400/10 px-2 py-1 rounded border border-amber-400/30">
-                            <div className="w-3 h-3 rounded-full border-2 border-amber-400 shadow-[0_0_5px_#fbbf24]"></div>
-                            <span>金色圆圈：真实发生的碰撞 (Ground Truth)</span>
+                            <div className="w-3 h-3 rounded-full border-2 border-amber-400 shadow-[0_0_6px_#fbbf24]"></div>
+                            <span>金色圆圈 = 真实碰撞 Ground Truth</span>
                         </div>
                     </div>
-                    
-                    <div className="relative flex-1 w-full rounded-xl overflow-hidden border border-borderBorder/50 mt-2 bg-darkBg">
-                        <ReactECharts option={option} className="w-full h-full absolute inset-0 z-10" onClick={handleClick} />
-                    </div>
+                    <SVGHeatmap gridRaw={gridRaw} currentTime={currentTime} onAreaClick={onAreaClick} />
                 </div>
             );
         });

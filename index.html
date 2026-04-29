@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>时空预测与风险预警系统</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        darkBg: '#0b1120',
+                        panelBg: '#111827',
+                        primary: '#06b6d4', 
+                        secondary: '#8b5cf6', 
+                        danger: '#ef4444', 
+                        textMain: '#f8fafc',
+                        textMuted: '#94a3b8',
+                        borderBorder: '#334155'
+                    }
+                }
+            }
+        }
+    </script>
+
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- ECharts -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    
+    <!-- Leaflet & ECharts-Leaflet Extension -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/echarts-extension-leaflet@1.0.1/dist/echarts-extension-leaflet.min.js"></script>
+
+    <style>
+        body { background-color: #0b1120; color: #f8fafc; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; overflow-x: hidden; }
+        .glass-panel { background: rgba(17, 24, 39, 0.7); backdrop-filter: blur(12px); border: 1px solid rgba(51, 65, 85, 0.5); border-radius: 0.75rem; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.5); }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(51, 65, 85, 0.8); border-radius: 3px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgba(71, 85, 105, 1); }
+        
+        @keyframes playPulse {
+            0% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0.4); }
+            70% { box-shadow: 0 0 0 10px rgba(6, 182, 212, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(6, 182, 212, 0); }
+        }
+        .animate-play-pulse { animation: playPulse 2s infinite; }
+    </style>
+</head>
+<body class="min-h-screen text-textMain custom-scrollbar p-4 flex flex-col gap-4">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        // ==========================================
+        // 1. 数据配置与获取逻辑 
+        // ==========================================
+        const METRICS_DATA = {
+            nyc: {
+                mainMetricName: "AUC-PR", mainMetricValue: "0.6955", f1: "0.6443", recall: "0.8265",
+                models: {
+                    categories: ['GSNet', 'LSTM', 'CatBoost', 'Sniper', 'Myplan(Ours)'],
+                    aucPr: [0.5890, 0.5899, 0.6134, 0.6240, 0.6955],
+                    f1: [0.6128, 0.6155, 0.6109, 0.6262, 0.6443],
+                    recall: [0.7485, 0.7914, 0.7542, 0.7004, 0.8265]
+                },
+                ablation: {
+                    categories: ['不加自适应及后处理', '不加自适应', '不加后处理', 'Myplan(完整)'],
+                    aucPr: [0.6252, 0.6601, 0.6672, 0.6955],
+                    f1: [0.6087, 0.6228, 0.6348, 0.6443],
+                    recall: [0.7108, 0.8046, 0.7407, 0.8265]
+                }
+            },
+            chicago: {
+                mainMetricName: "AUC-PR", mainMetricValue: "0.5617", f1: "0.4730", recall: "0.7055",
+                models: {
+                    categories: ['GSNet', 'LSTM', 'CatBoost', 'Sniper', 'Myplan(Ours)'],
+                    aucPr: [0.4662, 0.4046, 0.4605, 0.4704, 0.5617],
+                    f1: [0.3872, 0.3782, 0.3971, 0.4137, 0.4730],
+                    recall: [0.4351, 0.4223, 0.4480, 0.2694, 0.7055]
+                },
+                ablation: {
+                    categories: ['不加自适应及后处理', '不加自适应', '不加后处理', 'Myplan(完整)'],
+                    aucPr: [0.4725, 0.5176, 0.5136, 0.5617],
+                    f1: [0.4137, 0.4433, 0.4465, 0.4730],
+                    recall: [0.6318, 0.6693, 0.6401, 0.7055]
+                }
+            }
+        };
+
+        const fetchExperimentData = async () => {
+            try {
+                const response = await fetch("results/frontend_real_data.json");
+                if (!response.ok) throw new Error("JSON数据读取失败");
+                const rawData = await response.json();
+                return { isDemo: false, raw: rawData, timeCount: 13 };
+            } catch (err) {
+                console.warn("未能读取真实数据:", err.message);
+                return {
+                    isDemo: true,
+                    raw: {
+                        nyc: { grid: Array.from({length: 100}, (_, i) => ({ id: i, x: i%10, y: Math.floor(i/10), flowSeries: Array(13).fill(0).map(()=>Math.random()*2-1), labelSeries: Array(13).fill(0).map(()=>Math.random()>0.9?1:0)})) },
+                        chicago: { grid: Array.from({length: 100}, (_, i) => ({ id: i, x: i%10, y: Math.floor(i/10), flowSeries: Array(13).fill(0).map(()=>Math.random()*2-1), labelSeries: Array(13).fill(0).map(()=>Math.random()>0.9?1:0)})) }
+                    },
+                    timeCount: 13
+                };
+            }
+        };
+
+        const sigmoid = (x) => 1 / (1 + Math.exp(-x));
+
+        // 经纬度映射函数
+        const mapGridToGeo = (dataset, x, y) => {
+            if (dataset === 'nyc') {
+                const lng = -74.08 + x * 0.015;
+                const lat = 40.80 - y * 0.015;
+                return [lng, lat];
+            } else {
+                const lng = -87.70 + x * 0.015;
+                const lat = 41.95 - y * 0.015;
+                return [lng, lat];
+            }
+        };
+
+        // ==========================================
+        // 2. 通用 ECharts 渲染组件
+        // ==========================================
+        const { useEffect, useRef, useState, useMemo, useCallback, memo } = React;
+
+        const ReactECharts = memo(({ option, style, className, onClick }) => {
+            const chartRef = useRef(null);
+            const chartInstance = useRef(null);
+            
+            useEffect(() => {
+                if (!chartInstance.current) {
+                    chartInstance.current = echarts.init(chartRef.current, 'dark', { background: 'transparent' });
+                }
+                const chart = chartInstance.current;
+                
+                chart.setOption(option, { notMerge: false, lazyUpdate: true });
+                
+                if (onClick) {
+                    chart.off('click');
+                    chart.on('click', onClick);
+                }
+                
+                const handleResize = () => chart.resize();
+                window.addEventListener('resize', handleResize);
+                return () => window.removeEventListener('resize', handleResize);
+            }, [option, onClick]);
+
+            return <div ref={chartRef} style={style} className={className} />;
+        });
+
+        // ==========================================
+        // 3. 业务图表组件
+        // ==========================================
+        const MetricCard = ({ title, value, subtext, isDanger }) => (
+            <div className={`glass-panel p-4 flex flex-col justify-center ${isDanger ? 'border-danger/50 shadow-[0_0_15px_rgba(239,68,68,0.2)]' : ''} transition-all duration-300`}>
+                <div className="text-textMuted text-sm font-medium mb-1">{title}</div>
+                <div className={`text-3xl font-bold ${isDanger ? 'text-danger' : 'text-primary'} transition-all duration-300`}>{value}</div>
+                {subtext && <div className="text-xs text-textMuted mt-2">{subtext}</div>}
+            </div>
+        );
+
+        const MainVisualization = memo(({ gridRaw, currentTime, onAreaClick, datasetName }) => {
+            const heatmapData = useMemo(() => {
+                if(!gridRaw) return [];
+                return gridRaw.map(g => {
+                    const geo = mapGridToGeo(datasetName, g.x, g.y);
+                    return [geo[0], geo[1], sigmoid(g.flowSeries[currentTime]), g.x, g.y];
+                });
+            }, [gridRaw, currentTime, datasetName]);
+
+            const gtData = useMemo(() => {
+                if(!gridRaw) return [];
+                return gridRaw.filter(g => g.labelSeries[currentTime] === 1).map(g => {
+                    const geo = mapGridToGeo(datasetName, g.x, g.y);
+                    return [geo[0], geo[1], 1, g.x, g.y];
+                });
+            }, [gridRaw, currentTime, datasetName]);
+
+            const center = datasetName === 'nyc' ? [-74.01, 40.73] : [-87.63, 41.88];
+
+            const option = useMemo(() => ({
+                tooltip: { 
+                    position: 'top', 
+                    formatter: p => {
+                        const gx = p.data[3];
+                        const gy = p.data[4];
+                        if(p.seriesName === '风险分布') return `网格区域(${gx}, ${gy})<br/>预测风险值: ${(p.data[2]*100).toFixed(1)}%`;
+                        if(p.seriesName === 'Ground Truth') return `网格区域(${gx}, ${gy})<br/><span style="color:#fbbf24">⚠️ 此处发生真实碰撞</span>`;
+                    }
+                },
+                leaflet: {
+                    center: center,
+                    zoom: 11,
+                    roam: 'move', // 允许地图拖动平移
+                    tiles: [{
+                        urlTemplate: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+                    }]
+                },
+                visualMap: {
+                    min: 0, max: 1, calculable: true, orient: 'horizontal', left: 'center', bottom: 10,
+                    inRange: { color: ['#0f172a', '#3b82f6', '#8b5cf6', '#ef4444'] },
+                    textStyle: { color: '#f8fafc', fontWeight: 'bold' },
+                    seriesIndex: 0 
+                },
+                series: [
+                    {
+                        name: '风险分布', type: 'scatter', coordinateSystem: 'leaflet',
+                        data: heatmapData,
+                        symbol: 'rect',
+                        symbolSize: 32, // 固定方块大小，呈现网格状
+                        itemStyle: { opacity: 0.6, borderColor: 'rgba(255, 255, 255, 0.05)', borderWidth: 1 } // 半透明格式
+                    },
+                    {
+                        name: 'Ground Truth', type: 'scatter', coordinateSystem: 'leaflet',
+                        data: gtData,
+                        symbol: 'emptyCircle',
+                        symbolSize: 22,
+                        itemStyle: { color: '#fbbf24', borderWidth: 3, shadowColor: 'rgba(251, 191, 36, 0.8)', shadowBlur: 10 },
+                        z: 10 
+                    }
+                ],
+                animationDurationUpdate: 300 
+            }), [heatmapData, gtData, center]);
+
+            const handleClick = useCallback((params) => {
+                if(params && params.data && params.data.length >= 5) {
+                    onAreaClick(params.data[3], params.data[4]); 
+                }
+            }, [onAreaClick]);
+
+            return (
+                <div className="glass-panel p-4 flex-1 flex flex-col relative overflow-hidden">
+                    <div className="flex justify-between items-center mb-2 relative z-20">
+                        <h3 className="text-lg font-bold text-textMain flex items-center gap-2">
+                            <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                            {datasetName.toUpperCase()} 城市地理预警网格 (支持拖拽)
+                        </h3>
+                        <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-400/10 px-2 py-1 rounded border border-amber-400/30">
+                            <div className="w-3 h-3 rounded-full border-2 border-amber-400 shadow-[0_0_5px_#fbbf24]"></div>
+                            <span>金色圆圈：真实发生的碰撞 (Ground Truth)</span>
+                        </div>
+                    </div>
+                    
+                    <div className="relative flex-1 w-full rounded-xl overflow-hidden border border-borderBorder/50 mt-2 bg-darkBg">
+                        <ReactECharts option={option} className="w-full h-full absolute inset-0 z-10" onClick={handleClick} />
+                    </div>
+                </div>
+            );
+        });
+
+        const ModelComparison = memo(({ datasetData }) => {
+            const option = useMemo(() => ({
+                tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                legend: { textStyle: { color: '#94a3b8' }, top: 0 },
+                grid: { top: 30, bottom: 20, left: 35, right: 10 },
+                xAxis: { type: 'category', data: datasetData.categories, axisLine: { lineStyle: { color: '#475569' } }, axisLabel: { fontSize: 10 } },
+                yAxis: { type: 'value', min: 0.2, axisLine: { show: false }, splitLine: { lineStyle: { color: '#1e293b' } } },
+                series: [
+                    { name: 'AUC-PR', type: 'bar', data: datasetData.aucPr, itemStyle: { color: '#06b6d4', borderRadius: [4,4,0,0] } },
+                    { name: 'F1 Score', type: 'bar', data: datasetData.f1, itemStyle: { color: '#8b5cf6', borderRadius: [4,4,0,0] } }
+                ]
+            }), [datasetData]);
+
+            return (
+                <div className="flex-1 flex flex-col pt-2">
+                    <ReactECharts option={option} className="w-full flex-1 min-h-[250px]" />
+                </div>
+            );
+        });
+
+        const AblationStudy = memo(({ ablationData }) => {
+            const option = useMemo(() => ({
+                tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                legend: { textStyle: { color: '#94a3b8' }, top: 0 },
+                grid: { top: 30, bottom: 40, left: 35, right: 10 },
+                xAxis: { type: 'category', data: ablationData.categories, axisLabel: { fontSize: 10, rotate: 15 } },
+                yAxis: { type: 'value', min: 0.4, axisLine: { show: false }, splitLine: { lineStyle: { color: '#1e293b' } } },
+                series: [
+                    { name: 'Recall', type: 'line', data: ablationData.recall, itemStyle: { color: '#f59e0b' }, symbolSize: 8, lineStyle: {width: 3} },
+                    { name: 'F1 Score', type: 'bar', data: ablationData.f1, itemStyle: { color: '#06b6d4' } }
+                ]
+            }), [ablationData]);
+
+            return (
+                <div className="flex-1 flex flex-col pt-2">
+                    <ReactECharts option={option} className="w-full flex-1 min-h-[250px]" />
+                </div>
+            );
+        });
+
+        const GlobalTrend = memo(({ gridRaw, currentTime, timeCount }) => {
+            const globalTrendData = useMemo(() => {
+                if (!gridRaw || !gridRaw.length) return [];
+                const trends = [];
+                for (let t = 0; t < timeCount; t++) {
+                    let sum = 0;
+                    gridRaw.forEach(g => { sum += sigmoid(g.flowSeries[t]); });
+                    trends.push(sum / gridRaw.length);
+                }
+                return trends;
+            }, [gridRaw, timeCount]);
+
+            const option = useMemo(() => ({
+                tooltip: { trigger: 'axis', formatter: p => `时间 ${p[0].name}<br/>平均风险: ${(p[0].value*100).toFixed(1)}%` },
+                grid: { top: 30, bottom: 20, left: 35, right: 15 },
+                xAxis: { type: 'category', data: Array.from({length: timeCount}, (_,i)=>i), axisLine: { lineStyle: { color: '#475569' } } },
+                yAxis: { type: 'value', min: 'dataMin', splitLine: { lineStyle: { color: '#1e293b' }, type: 'dashed' } },
+                series: [
+                    { 
+                        type: 'line', data: globalTrendData, smooth: true, 
+                        itemStyle: { color: '#ec4899' }, 
+                        areaStyle: { 
+                            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                                { offset: 0, color: 'rgba(236,72,153,0.5)' },
+                                { offset: 1, color: 'rgba(236,72,153,0.01)' }
+                            ])
+                        },
+                        markLine: {
+                            symbol: ['none', 'none'],
+                            data: [ { xAxis: currentTime } ],
+                            lineStyle: { color: '#06b6d4', type: 'dashed', width: 2 },
+                            label: { show: true, formatter: 'T={c}', position: 'end', color: '#06b6d4' },
+                            animation: false
+                        }
+                    }
+                ],
+                animationDurationUpdate: 300
+            }), [globalTrendData, currentTime, timeCount]);
+
+            return (
+                <div className="flex-1 flex flex-col pt-2">
+                    <ReactECharts option={option} className="w-full flex-1 min-h-[250px]" />
+                </div>
+            );
+        });
+
+        const DetailPanel = memo(({ areaData, currentTime }) => {
+            if (!areaData) {
+                return (
+                    <div className="bg-panelBg rounded border border-borderBorder p-4 flex-1 flex flex-col justify-center items-center text-textMuted">
+                        <p>请点击左侧热力图网格查看详情</p>
+                    </div>
+                );
+            }
+
+            const currentRisk = sigmoid(areaData.flowSeries[currentTime]);
+            const isHit = areaData.labelSeries[currentTime] === 1;
+            const trendData = areaData.flowSeries.map(v => sigmoid(v));
+
+            const trendOption = {
+                grid: { top: 10, bottom: 20, left: 25, right: 10 },
+                xAxis: { type: 'category', show: false, data: Array.from({length: trendData.length}, (_, i) => i) },
+                yAxis: { type: 'value', min: 0, max: 1, splitLine: { show: false } },
+                series: [{ 
+                    type: 'line', data: trendData, smooth: true, itemStyle: { color: '#ef4444' }, areaStyle: { color: 'rgba(239,68,68,0.2)' },
+                    markPoint: {
+                        data: [{ coord: [currentTime, trendData[currentTime]], itemStyle: { color: '#06b6d4' } }],
+                        symbolSize: 10
+                    }
+                }],
+                animationDurationUpdate: 300
+            };
+
+            return (
+                <div className="bg-panelBg rounded border border-borderBorder p-4 flex-1 flex flex-col gap-3">
+                    <h3 className="font-bold border-b border-borderBorder pb-1 text-primary">网格感知 ({areaData.x}, {areaData.y})</h3>
+                    <div>
+                        <div className="text-sm text-textMuted mb-1">当前时刻预测风险</div>
+                        <div className={`text-2xl font-bold ${currentRisk > 0.5 ? 'text-danger' : 'text-primary'}`}>
+                            {(currentRisk * 100).toFixed(1)}%
+                        </div>
+                    </div>
+                    <div className="h-24">
+                        <ReactECharts option={trendOption} className="w-full h-full" />
+                    </div>
+                    <div className="mt-auto p-2 rounded text-sm border border-borderBorder/50 bg-[#0b1120]">
+                        {isHit ? (
+                            <span className="text-amber-400 font-bold text-xs">⚠️ 该区域正发生真实碰撞</span>
+                        ) : (
+                            <span className="text-green-400 text-xs">✅ 该区域当前无碰撞记录</span>
+                        )}
+                    </div>
+                </div>
+            );
+        });
+
+        const ActiveAlerts = memo(({ gridRaw, currentTime, threshold }) => {
+            const alerts = useMemo(() => {
+                if(!gridRaw || !gridRaw.length) return [];
+                const sorted = gridRaw.map(g => ({
+                    x: g.x, y: g.y, risk: sigmoid(g.flowSeries[currentTime]), isHit: g.labelSeries[currentTime] === 1
+                })).sort((a, b) => b.risk - a.risk).slice(0, 3);
+                return sorted;
+            }, [gridRaw, currentTime]);
+
+            return (
+                <div className="mt-4 p-3 rounded bg-panelBg border border-danger/30 flex flex-col" style={{height: '180px'}}>
+                    <h4 className="text-sm font-bold text-danger flex items-center gap-2 mb-2 border-b border-danger/20 pb-2">
+                        <span className="animate-pulse">🚨</span> 实时高危预警 Top 3
+                    </h4>
+                    <div className="flex flex-col gap-2 overflow-y-auto custom-scrollbar flex-1">
+                        {alerts.map((a, i) => (
+                            <div key={i} className={`flex justify-between items-center p-2 rounded text-xs ${a.risk >= threshold ? 'bg-danger/10 border border-danger/30' : 'bg-primary/5 border border-primary/20'}`}>
+                                <div>
+                                    <div className="font-mono text-textMain font-bold">网格 ({a.x}, {a.y})</div>
+                                    {a.isHit && <div className="text-[10px] text-amber-400 mt-0.5">⚠️ 已命中 Ground Truth</div>}
+                                </div>
+                                <div className={`font-bold text-lg ${a.risk >= threshold ? 'text-danger' : 'text-primary'}`}>
+                                    {(a.risk * 100).toFixed(1)}%
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            );
+        });
+
+        // ==========================================
+        // 4. 主页面组件
+        // ==========================================
+        const App = () => {
+            const [data, setData] = useState(null);
+            const [datasetId, setDatasetId] = useState('nyc');
+            const [currentTime, setCurrentTime] = useState(0); 
+            const [selectedArea, setSelectedArea] = useState(null);
+            
+            const [isPlaying, setIsPlaying] = useState(false);
+            const [threshold, setThreshold] = useState(0.50);
+            
+            // 左侧 Tab 状态
+            const [activeLeftTab, setActiveLeftTab] = useState(0);
+
+            useEffect(() => {
+                fetchExperimentData().then(res => setData(res));
+            }, []);
+
+            useEffect(() => {
+                let interval;
+                if (isPlaying && data) {
+                    interval = setInterval(() => {
+                        setCurrentTime(prev => (prev + 1) % data.timeCount);
+                    }, 800); 
+                }
+                return () => clearInterval(interval);
+            }, [isPlaying, data]);
+
+            const handleDatasetSwitch = (newId) => {
+                setDatasetId(newId);
+                setSelectedArea(null);
+                setCurrentTime(0);
+                setIsPlaying(false);
+            };
+
+            const gridRaw = data ? data.raw[datasetId].grid : [];
+            const currentMetricsInfo = data ? METRICS_DATA[datasetId] : null;
+            
+            const currentHighRiskCount = useMemo(() => {
+                if(!gridRaw.length) return 0;
+                return gridRaw.filter(g => sigmoid(g.flowSeries[currentTime]) >= threshold).length;
+            }, [gridRaw, currentTime, threshold]);
+            
+            const handleAreaClick = useCallback((x, y) => {
+                const area = gridRaw.find(g => g.x === x && g.y === y);
+                setSelectedArea(area);
+            }, [gridRaw]);
+
+            if (!data) return <div className="flex items-center justify-center h-screen text-xl text-primary animate-pulse">正在加载双城市真实数据流...</div>;
+
+            return (
+                <div className="flex flex-col gap-4 h-full min-h-[95vh]">
+                    <header className="glass-panel px-6 py-4 flex justify-between items-center">
+                        <div className="flex items-center gap-6">
+                            <div>
+                                <h1 className="text-2xl font-black bg-clip-text text-transparent bg-gradient-to-r from-cyan-400 to-purple-500">
+                                    深度时空自适应风险预警平台 (Myplan)
+                                </h1>
+                                <p className="text-sm text-textMuted mt-1 flex items-center gap-2">
+                                    支持多城市双轨数据推演结果
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${data.isDemo ? 'bg-amber-500/10 text-amber-400 border-amber-500/30' : 'bg-green-500/10 text-green-400 border-green-500/30'}`}>
+                                        {data.isDemo ? "⚠ 备用数据模式" : "✅ 成功挂载 frontend_real_data.json"}
+                                    </span>
+                                </p>
+                            </div>
+                            
+                            <div className="ml-4 flex bg-panelBg rounded-lg p-1 border border-borderBorder relative z-50">
+                                <button onClick={() => handleDatasetSwitch('nyc')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${datasetId === 'nyc' ? 'bg-primary text-darkBg shadow' : 'text-textMuted hover:text-textMain'}`}>
+                                    🗽 New York
+                                </button>
+                                <button onClick={() => handleDatasetSwitch('chicago')} className={`px-4 py-2 rounded-md text-sm font-bold transition-all ${datasetId === 'chicago' ? 'bg-secondary text-darkBg shadow' : 'text-textMuted hover:text-textMain'}`}>
+                                    🏙️ Chicago
+                                </button>
+                            </div>
+                        </div>
+                        
+                        <div className="flex flex-col items-end gap-3">
+                            <div className="flex items-center gap-3 text-sm text-textMuted bg-panelBg px-3 py-1.5 rounded border border-borderBorder">
+                                <span>⚠️ 高风险预警阈值: <span className="font-bold text-primary">{threshold.toFixed(2)}</span></span>
+                                <input 
+                                    type="range" min="0.1" max="0.9" step="0.05" 
+                                    value={threshold} onChange={(e) => setThreshold(parseFloat(e.target.value))}
+                                    className="w-28 accent-primary cursor-pointer"
+                                />
+                            </div>
+
+                            <div className="text-sm text-textMuted font-mono flex items-center gap-3">
+                                <button 
+                                    onClick={() => setIsPlaying(!isPlaying)}
+                                    className={`px-3 py-1 rounded font-bold transition-all ${isPlaying ? 'bg-danger text-white animate-play-pulse' : 'bg-primary text-darkBg hover:bg-primary/80'}`}
+                                >
+                                    {isPlaying ? '⏸ 停止播放' : '▶ 自动演变'}
+                                </button>
+
+                                <div className="flex gap-1 ml-2">
+                                    <button 
+                                        onClick={() => { setIsPlaying(false); setCurrentTime(Math.max(0, currentTime - 1)); }}
+                                        className="bg-panelBg border border-borderBorder px-2 py-1 rounded text-textMuted hover:text-primary disabled:opacity-50"
+                                        disabled={currentTime === 0}
+                                    >◀</button>
+                                    <span className="bg-panelBg border border-borderBorder px-3 py-1 rounded">
+                                        T = {currentTime} <span className="text-xs text-borderBorder">/ {data.timeCount - 1}</span>
+                                    </span>
+                                    <button 
+                                        onClick={() => { setIsPlaying(false); setCurrentTime(Math.min(data.timeCount - 1, currentTime + 1)); }}
+                                        className="bg-panelBg border border-borderBorder px-2 py-1 rounded text-textMuted hover:text-primary disabled:opacity-50"
+                                        disabled={currentTime === data.timeCount - 1}
+                                    >▶</button>
+                                </div>
+                            </div>
+                        </div>
+                    </header>
+
+                    <div className="grid grid-cols-4 gap-4">
+                        <MetricCard title={`触发预警的网格数 (阈值 > ${threshold.toFixed(2)})`} value={currentHighRiskCount} isDanger={true} subtext="随时间切片与动态阈值实时跳动" />
+                        <MetricCard title="全局 Recall 召回率" value={currentMetricsInfo.recall} subtext="相较基线显著提升 (后处理作用)" />
+                        <MetricCard title="全局 F1 Score" value={currentMetricsInfo.f1} subtext="Myplan 完整模型打分" />
+                        <MetricCard title="核心评价指标 (AUC-PR)" value={currentMetricsInfo.mainMetricValue} subtext={`基于 ${datasetId.toUpperCase()} 测试集`} />
+                    </div>
+
+                    <div className="flex gap-4 flex-1 h-[520px]">
+                        
+                        <div className="w-1/4 flex flex-col glass-panel p-4">
+                            <div className="flex border-b border-borderBorder mb-2">
+                                <button 
+                                    className={`flex-1 pb-2 text-sm font-bold transition-colors ${activeLeftTab===0 ? 'text-primary border-b-2 border-primary' : 'text-textMuted hover:text-textMain'}`}
+                                    onClick={() => setActiveLeftTab(0)}
+                                >基线对比</button>
+                                <button 
+                                    className={`flex-1 pb-2 text-sm font-bold transition-colors ${activeLeftTab===1 ? 'text-primary border-b-2 border-primary' : 'text-textMuted hover:text-textMain'}`}
+                                    onClick={() => setActiveLeftTab(1)}
+                                >消融实验</button>
+                                <button 
+                                    className={`flex-1 pb-2 text-sm font-bold transition-colors ${activeLeftTab===2 ? 'text-primary border-b-2 border-primary' : 'text-textMuted hover:text-textMain'}`}
+                                    onClick={() => setActiveLeftTab(2)}
+                                >全局趋势</button>
+                            </div>
+                            <div className="flex-1 flex flex-col relative">
+                                {activeLeftTab === 0 && <ModelComparison datasetData={currentMetricsInfo.models} />}
+                                {activeLeftTab === 1 && <AblationStudy ablationData={currentMetricsInfo.ablation} />}
+                                {activeLeftTab === 2 && <GlobalTrend gridRaw={gridRaw} currentTime={currentTime} timeCount={data.timeCount} />}
+                            </div>
+                        </div>
+
+                        <MainVisualization 
+                            gridRaw={gridRaw} 
+                            currentTime={currentTime} 
+                            onAreaClick={handleAreaClick} 
+                            datasetName={datasetId}
+                        />
+
+                        <div className="w-80 flex flex-col glass-panel p-4">
+                            <h3 className="text-lg font-bold mb-3 flex items-center gap-2">
+                                <span className="text-primary">⚲</span> 区域与全局状态
+                            </h3>
+                            <DetailPanel areaData={selectedArea} currentTime={currentTime} />
+                            <ActiveAlerts gridRaw={gridRaw} currentTime={currentTime} threshold={threshold} />
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
